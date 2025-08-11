@@ -1,15 +1,59 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+HubSpot Complete Data Exporter
+Exports contacts with emails, meetings, and READ AI summaries to Excel
+
+Setup Instructions:
+1. Install dependencies: pip install requests pandas openpyxl
+2. Set your HubSpot API key as environment variable or enter when prompted
+3. Run: python hubspot_exporter.py
+
+Author: Your Name
+Date: 2024
+"""
+
+# Standard library imports
+import os
+import sys
+import json
+import time
+from datetime import datetime
+
+# Check for required packages
+required_packages = {
+    'requests': 'requests',
+    'pandas': 'pandas',
+    'openpyxl': 'openpyxl'
+}
+
+missing_packages = []
+for import_name, pip_name in required_packages.items():
+    try:
+        __import__(import_name)
+    except ImportError:
+        missing_packages.append(pip_name)
+
+if missing_packages:
+    print("❌ Missing required packages. Please install them using:")
+    print(f"   pip install {' '.join(missing_packages)}")
+    print("\nOr install all dependencies:")
+    print("   pip install requests pandas openpyxl")
+    sys.exit(1)
+
+# Third-party imports (after checking they exist)
 import requests
 import pandas as pd
-from datetime import datetime
-import json
-import os
-import time
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font
 from openpyxl.utils.dataframe import dataframe_to_rows
 
+
 class HubSpotCompleteExporter:
+    """Main class for exporting HubSpot data to Excel"""
+    
     def __init__(self, api_key, debug=True):
+        """Initialize the exporter with API credentials"""
         self.api_key = api_key
         self.base_url = "https://api.hubapi.com"
         self.headers = {
@@ -26,10 +70,19 @@ class HubSpotCompleteExporter:
         
         # Test basic connection
         url = f"{self.base_url}/crm/v3/objects/contacts?limit=1"
-        response = requests.get(url, headers=self.headers)
+        try:
+            response = requests.get(url, headers=self.headers, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Connection error: {str(e)}")
+            return False
         
         if response.status_code != 200:
             print(f"❌ Authentication failed! Status: {response.status_code}")
+            if response.status_code == 401:
+                print("\n   Please check:")
+                print("   1. Your API key is correct")
+                print("   2. It's a Private App token (starts with 'pat-')")
+                print("   3. The token hasn't expired")
             return False
             
         print("✅ API connection successful!")
@@ -48,41 +101,17 @@ class HubSpotCompleteExporter:
         
         for obj, name in objects_to_test.items():
             url = f"{self.base_url}/crm/v3/objects/{obj}?limit=1"
-            response = requests.get(url, headers=self.headers)
-            if response.status_code == 200:
-                print(f"   ✅ {name} access granted")
-                accessible_objects.append(obj)
-            else:
-                print(f"   ❌ {name} access denied (status: {response.status_code})")
+            try:
+                response = requests.get(url, headers=self.headers, timeout=10)
+                if response.status_code == 200:
+                    print(f"   ✅ {name} access granted")
+                    accessible_objects.append(obj)
+                else:
+                    print(f"   ❌ {name} access denied (status: {response.status_code})")
+            except:
+                print(f"   ⚠️  {name} access check failed")
                 
-        # Get association types
-        print("\n🔗 Fetching association types...")
-        self.get_association_types()
-        
         return True
-    
-    def get_association_types(self):
-        """Get all available association types between contacts and other objects"""
-        try:
-            # Get association types for contacts to emails
-            url = f"{self.base_url}/crm/v4/associations/contacts/emails/labels"
-            response = requests.get(url, headers=self.headers)
-            if response.status_code == 200:
-                self.association_types_cache['emails'] = response.json().get('results', [])
-                if self.debug:
-                    print(f"   Found {len(self.association_types_cache['emails'])} email association types")
-            
-            # Get association types for contacts to meetings
-            url = f"{self.base_url}/crm/v4/associations/contacts/meetings/labels"
-            response = requests.get(url, headers=self.headers)
-            if response.status_code == 200:
-                self.association_types_cache['meetings'] = response.json().get('results', [])
-                if self.debug:
-                    print(f"   Found {len(self.association_types_cache['meetings'])} meeting association types")
-                    
-        except Exception as e:
-            if self.debug:
-                print(f"   Note: Could not fetch association types (using defaults): {str(e)}")
     
     def get_all_associations_for_contact(self, contact_id):
         """Get ALL associations for a contact using both v3 and v4 APIs"""
@@ -94,163 +123,97 @@ class HubSpotCompleteExporter:
             'tasks': []
         }
         
-        # Try v4 API first (more comprehensive)
-        try:
-            url = f"{self.base_url}/crm/v4/objects/contacts/{contact_id}/associations/emails"
-            response = requests.get(url, headers=self.headers)
-            if response.status_code == 200:
-                associations['emails'] = response.json().get('results', [])
-        except:
-            pass
-            
-        # Also try v3 API for each object type
+        # Try v3 API for each object type
         for obj_type in associations.keys():
             try:
                 url = f"{self.base_url}/crm/v3/objects/contacts/{contact_id}/associations/{obj_type}"
-                response = requests.get(url, headers=self.headers)
+                response = requests.get(url, headers=self.headers, timeout=10)
                 if response.status_code == 200:
-                    v3_results = response.json().get('results', [])
-                    # Merge with v4 results, avoiding duplicates
-                    existing_ids = {item.get('toObjectId', item.get('id')) for item in associations[obj_type]}
-                    for item in v3_results:
-                        if item.get('id') not in existing_ids:
-                            associations[obj_type].append(item)
+                    associations[obj_type] = response.json().get('results', [])
             except:
                 pass
                 
         return associations
     
     def get_emails_for_contact(self, contact_id):
-        """Fetch all emails associated with a contact with improved detection"""
+        """Fetch all emails associated with a contact"""
         all_emails = []
         
-        # Get associations
-        associations = self.get_all_associations_for_contact(contact_id)
-        email_ids = []
-        
-        # Extract email IDs from associations
-        for assoc in associations.get('emails', []):
-            email_id = assoc.get('toObjectId') or assoc.get('id')
-            if email_id:
-                email_ids.append(email_id)
-        
-        # Fetch email details
-        for email_id in email_ids:
-            try:
-                url = f"{self.base_url}/crm/v3/objects/emails/{email_id}"
-                # Request ALL properties
-                params = {"properties": "*"}
-                response = requests.get(url, headers=self.headers, params=params)
-                
-                if response.status_code == 200:
-                    email_data = response.json()
-                    all_emails.append(email_data)
-            except Exception as e:
-                if self.debug:
-                    print(f"      Error fetching email {email_id}: {str(e)}")
+        try:
+            # Get associations
+            associations = self.get_all_associations_for_contact(contact_id)
+            email_ids = [item.get('id') for item in associations.get('emails', []) if item.get('id')]
+            
+            # Fetch email details
+            for email_id in email_ids:
+                try:
+                    url = f"{self.base_url}/crm/v3/objects/emails/{email_id}"
+                    params = {"properties": "*"}
+                    response = requests.get(url, headers=self.headers, params=params, timeout=10)
                     
+                    if response.status_code == 200:
+                        all_emails.append(response.json())
+                except:
+                    pass
+                    
+        except Exception as e:
+            if self.debug:
+                print(f"      Error fetching emails for contact {contact_id}: {str(e)}")
+                
         return all_emails
     
     def get_meetings_for_contact(self, contact_id):
-        """Fetch all meetings associated with a contact with improved detection"""
+        """Fetch all meetings associated with a contact"""
         all_meetings = []
         
-        # Get associations
-        associations = self.get_all_associations_for_contact(contact_id)
-        meeting_ids = []
-        
-        # Extract meeting IDs
-        for assoc in associations.get('meetings', []):
-            meeting_id = assoc.get('toObjectId') or assoc.get('id')
-            if meeting_id:
-                meeting_ids.append(meeting_id)
-        
-        # Fetch meeting details
-        for meeting_id in meeting_ids:
-            try:
-                url = f"{self.base_url}/crm/v3/objects/meetings/{meeting_id}"
-                # Request ALL properties
-                params = {"properties": "*"}
-                response = requests.get(url, headers=self.headers, params=params)
-                
-                if response.status_code == 200:
-                    meeting_data = response.json()
-                    all_meetings.append(meeting_data)
-            except Exception as e:
-                if self.debug:
-                    print(f"      Error fetching meeting {meeting_id}: {str(e)}")
+        try:
+            # Get associations
+            associations = self.get_all_associations_for_contact(contact_id)
+            meeting_ids = [item.get('id') for item in associations.get('meetings', []) if item.get('id')]
+            
+            # Fetch meeting details
+            for meeting_id in meeting_ids:
+                try:
+                    url = f"{self.base_url}/crm/v3/objects/meetings/{meeting_id}"
+                    params = {"properties": "*"}
+                    response = requests.get(url, headers=self.headers, params=params, timeout=10)
                     
+                    if response.status_code == 200:
+                        all_meetings.append(response.json())
+                except:
+                    pass
+                    
+        except Exception as e:
+            if self.debug:
+                print(f"      Error fetching meetings for contact {contact_id}: {str(e)}")
+                
         return all_meetings
     
     def get_notes_for_contact(self, contact_id):
         """Fetch all notes (including READ AI summaries) for a contact"""
         all_notes = []
         
-        # Get associations
-        associations = self.get_all_associations_for_contact(contact_id)
-        note_ids = []
-        
-        # Extract note IDs
-        for assoc in associations.get('notes', []):
-            note_id = assoc.get('toObjectId') or assoc.get('id')
-            if note_id:
-                note_ids.append(note_id)
-        
-        # Fetch note details
-        for note_id in note_ids:
-            try:
-                url = f"{self.base_url}/crm/v3/objects/notes/{note_id}"
-                params = {"properties": "*"}
-                response = requests.get(url, headers=self.headers, params=params)
-                
-                if response.status_code == 200:
-                    note_data = response.json()
-                    all_notes.append(note_data)
-            except:
-                pass
-                
-        return all_notes
-    
-    def get_contact_timeline(self, contact_id):
-        """Get complete timeline of activities for a contact"""
-        timeline_data = {
-            'total_emails': 0,
-            'total_meetings': 0,
-            'total_notes': 0,
-            'has_read_ai': False,
-            'read_ai_summaries': []
-        }
-        
         try:
-            # Get emails
-            emails = self.get_emails_for_contact(contact_id)
-            timeline_data['total_emails'] = len(emails)
+            # Get associations
+            associations = self.get_all_associations_for_contact(contact_id)
+            note_ids = [item.get('id') for item in associations.get('notes', []) if item.get('id')]
             
-            # Get meetings
-            meetings = self.get_meetings_for_contact(contact_id)
-            timeline_data['total_meetings'] = len(meetings)
-            
-            # Get notes (including READ AI)
-            notes = self.get_notes_for_contact(contact_id)
-            timeline_data['total_notes'] = len(notes)
-            
-            # Check for READ AI summaries in notes
-            for note in notes:
-                props = note.get('properties', {})
-                note_body = props.get('hs_note_body', '') or ''
-                # Look for READ AI indicators
-                if any(indicator in note_body.lower() for indicator in ['read ai', 'read.ai', 'meeting summary', 'ai summary']):
-                    timeline_data['has_read_ai'] = True
-                    timeline_data['read_ai_summaries'].append({
-                        'date': props.get('hs_timestamp', ''),
-                        'summary': note_body[:500] + '...' if len(note_body) > 500 else note_body
-                    })
+            # Fetch note details
+            for note_id in note_ids:
+                try:
+                    url = f"{self.base_url}/crm/v3/objects/notes/{note_id}"
+                    params = {"properties": "*"}
+                    response = requests.get(url, headers=self.headers, params=params, timeout=10)
                     
-        except Exception as e:
-            if self.debug:
-                print(f"      Error getting timeline for contact {contact_id}: {str(e)}")
-                
-        return timeline_data
+                    if response.status_code == 200:
+                        all_notes.append(response.json())
+                except:
+                    pass
+                    
+        except:
+            pass
+            
+        return all_notes
     
     def get_contacts_from_list(self, list_id, limit=100):
         """Fetch contacts from a specific list"""
@@ -266,15 +229,16 @@ class HubSpotCompleteExporter:
                 "count": limit,
                 "vidOffset": offset,
                 "property": ["email", "firstname", "lastname", "phone", "company", 
-                           "lifecyclestage", "hs_lead_status", "notes_last_updated", 
-                           "num_associated_deals", "recent_deal_amount"]
+                           "lifecyclestage", "hs_lead_status", "notes_last_updated"]
             }
             
             try:
-                response = requests.get(url, headers=self.headers, params=params)
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
                 
                 if response.status_code != 200:
                     print(f"❌ Error fetching contacts: {response.status_code}")
+                    if response.status_code == 404:
+                        print(f"   List ID {list_id} not found!")
                     break
                 
                 data = response.json()
@@ -314,6 +278,49 @@ class HubSpotCompleteExporter:
         print(f"✅ Total contacts retrieved: {len(v3_contacts)}")
         return v3_contacts
     
+    def get_all_contacts(self):
+        """Fetch all contacts from HubSpot"""
+        contacts = []
+        after = None
+        page = 1
+        
+        print("\n📥 Fetching all contacts...")
+        
+        while True:
+            url = f"{self.base_url}/crm/v3/objects/contacts"
+            params = {
+                "limit": 100,
+                "properties": "email,firstname,lastname,phone,company,lifecyclestage,hs_lead_status"
+            }
+            if after:
+                params["after"] = after
+            
+            try:
+                response = requests.get(url, headers=self.headers, params=params, timeout=30)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    page_contacts = data.get("results", [])
+                    contacts.extend(page_contacts)
+                    
+                    print(f"   Page {page}: Retrieved {len(page_contacts)} contacts")
+                    
+                    if "paging" in data and "next" in data["paging"]:
+                        after = data["paging"]["next"]["after"]
+                        page += 1
+                    else:
+                        break
+                else:
+                    print(f"❌ Error: {response.status_code}")
+                    break
+                    
+            except Exception as e:
+                print(f"❌ Exception: {str(e)}")
+                break
+        
+        print(f"✅ Total contacts retrieved: {len(contacts)}")
+        return contacts
+    
     def process_contacts_with_details(self, contacts):
         """Process contacts and fetch all associated data"""
         contact_data = []
@@ -332,10 +339,28 @@ class HubSpotCompleteExporter:
             contact_id = contact.get("id", "")
             properties = contact.get("properties", {})
             
-            # Get timeline data for this contact
-            timeline = self.get_contact_timeline(contact_id)
+            # Get emails
+            emails = self.get_emails_for_contact(contact_id)
             
-            # Basic contact info with timeline summary
+            # Get meetings
+            meetings = self.get_meetings_for_contact(contact_id)
+            
+            # Get notes (for READ AI)
+            notes = self.get_notes_for_contact(contact_id)
+            has_read_ai = False
+            read_ai_summaries = []
+            
+            for note in notes:
+                props = note.get('properties', {})
+                note_body = props.get('hs_note_body', '') or ''
+                if any(indicator in note_body.lower() for indicator in ['read ai', 'read.ai', 'meeting summary', 'ai summary']):
+                    has_read_ai = True
+                    read_ai_summaries.append({
+                        'date': props.get('hs_timestamp', ''),
+                        'summary': note_body[:500] + '...' if len(note_body) > 500 else note_body
+                    })
+            
+            # Basic contact info
             contact_info = {
                 "Contact ID": contact_id,
                 "Email": properties.get("email", ""),
@@ -345,16 +370,15 @@ class HubSpotCompleteExporter:
                 "Company": properties.get("company", ""),
                 "Lifecycle Stage": properties.get("lifecyclestage", ""),
                 "Lead Status": properties.get("hs_lead_status", ""),
-                "Total Emails": timeline['total_emails'],
-                "Total Meetings": timeline['total_meetings'],
-                "Total Notes": timeline['total_notes'],
-                "Has READ AI": "Yes" if timeline['has_read_ai'] else "No",
+                "Total Emails": len(emails),
+                "Total Meetings": len(meetings),
+                "Total Notes": len(notes),
+                "Has READ AI": "Yes" if has_read_ai else "No",
                 "Last Updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             contact_data.append(contact_info)
             
             # Process emails
-            emails = self.get_emails_for_contact(contact_id)
             for email in emails:
                 props = email.get('properties', {})
                 email_info = {
@@ -372,7 +396,6 @@ class HubSpotCompleteExporter:
                 email_data.append(email_info)
             
             # Process meetings
-            meetings = self.get_meetings_for_contact(contact_id)
             for meeting in meetings:
                 props = meeting.get('properties', {})
                 meeting_info = {
@@ -392,7 +415,7 @@ class HubSpotCompleteExporter:
                 meeting_data.append(meeting_info)
             
             # Process READ AI summaries
-            for summary in timeline['read_ai_summaries']:
+            for summary in read_ai_summaries:
                 read_ai_info = {
                     "Contact ID": contact_id,
                     "Contact Email": properties.get("email", ""),
@@ -422,27 +445,7 @@ class HubSpotCompleteExporter:
             contacts = self.get_contacts_from_list(list_id)
             export_type = f"List: {list_name or list_id}"
         else:
-            print("\n📥 Fetching all contacts...")
-            # For all contacts, use the v3 API
-            contacts = []
-            after = None
-            while True:
-                url = f"{self.base_url}/crm/v3/objects/contacts"
-                params = {"limit": 100}
-                if after:
-                    params["after"] = after
-                
-                response = requests.get(url, headers=self.headers, params=params)
-                if response.status_code == 200:
-                    data = response.json()
-                    contacts.extend(data.get("results", []))
-                    
-                    if "paging" in data and "next" in data["paging"]:
-                        after = data["paging"]["next"]["after"]
-                    else:
-                        break
-                else:
-                    break
+            contacts = self.get_all_contacts()
             export_type = "All Contacts"
         
         if not contacts:
@@ -461,8 +464,12 @@ class HubSpotCompleteExporter:
         # Create summary DataFrame
         summary_df = contact_df.copy()
         
-        # Save to Excel
-        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Get the script directory for saving the file
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+        except:
+            script_dir = os.getcwd()
+            
         full_filepath = os.path.join(script_dir, filename)
         
         print(f"\n💾 Saving to: {full_filepath}")
@@ -477,9 +484,9 @@ class HubSpotCompleteExporter:
                     "Total Emails": len(email_df),
                     "Total Meetings": len(meeting_df),
                     "Total READ AI Summaries": len(read_ai_df),
-                    "Contacts with Emails": len(contact_df[contact_df['Total Emails'] > 0]),
-                    "Contacts with Meetings": len(contact_df[contact_df['Total Meetings'] > 0]),
-                    "Contacts with READ AI": len(contact_df[contact_df['Has READ AI'] == 'Yes'])
+                    "Contacts with Emails": len(contact_df[contact_df['Total Emails'] > 0]) if 'Total Emails' in contact_df else 0,
+                    "Contacts with Meetings": len(contact_df[contact_df['Total Meetings'] > 0]) if 'Total Meetings' in contact_df else 0,
+                    "Contacts with READ AI": len(contact_df[contact_df['Has READ AI'] == 'Yes']) if 'Has READ AI' in contact_df else 0
                 }])
                 metadata.to_excel(writer, sheet_name='Export Info', index=False)
                 
@@ -490,17 +497,17 @@ class HubSpotCompleteExporter:
                 if not email_df.empty:
                     email_df.to_excel(writer, sheet_name='Emails', index=False)
                 else:
-                    pd.DataFrame({"Note": ["No emails found"]}).to_excel(writer, sheet_name='Emails', index=False)
+                    pd.DataFrame({"Note": ["No emails found. Check if you have email permissions in HubSpot."]}).to_excel(writer, sheet_name='Emails', index=False)
                 
                 if not meeting_df.empty:
                     meeting_df.to_excel(writer, sheet_name='Meetings', index=False)
                 else:
-                    pd.DataFrame({"Note": ["No meetings found"]}).to_excel(writer, sheet_name='Meetings', index=False)
+                    pd.DataFrame({"Note": ["No meetings found. Check if you have meeting permissions in HubSpot."]}).to_excel(writer, sheet_name='Meetings', index=False)
                 
                 if not read_ai_df.empty:
                     read_ai_df.to_excel(writer, sheet_name='READ AI Summaries', index=False)
                 else:
-                    pd.DataFrame({"Note": ["No READ AI summaries found"]}).to_excel(writer, sheet_name='READ AI Summaries', index=False)
+                    pd.DataFrame({"Note": ["No READ AI summaries found. These are typically stored in notes."]}).to_excel(writer, sheet_name='READ AI Summaries', index=False)
             
             print(f"\n✅ Export complete!")
             print(f"📊 Final Summary:")
@@ -508,15 +515,20 @@ class HubSpotCompleteExporter:
             print(f"   - {len(email_df)} emails")
             print(f"   - {len(meeting_df)} meetings")
             print(f"   - {len(read_ai_df)} READ AI summaries")
+            print(f"\n📁 File saved to: {full_filepath}")
             
-            # Open folder
+            # Try to open folder (Windows only)
             if os.name == 'nt':
-                os.startfile(script_dir)
+                try:
+                    os.startfile(script_dir)
+                except:
+                    pass
             
             return True
             
         except Exception as e:
             print(f"\n❌ Error writing Excel file: {str(e)}")
+            print(f"   Make sure you have write permissions to: {script_dir}")
             return False
     
     def format_timestamp(self, timestamp):
@@ -537,8 +549,8 @@ def main():
     print("Exports: Contacts, Emails, Meetings, and READ AI Summaries")
     print("=" * 70)
     
-    # Get API key
-    API_KEY = os.environ.get('HUBSPOT_API_KEY', '')
+    # Get API key from environment or prompt
+    API_KEY = os.environ.get('HUBSPOT_API_KEY', '').strip()
     
     if not API_KEY:
         print("\n⚠️  No API key found in environment variable HUBSPOT_API_KEY")
@@ -546,23 +558,22 @@ def main():
     
     if not API_KEY:
         print("❌ No API key provided. Exiting.")
-        return
+        return 1
     
     # Create exporter
     exporter = HubSpotCompleteExporter(API_KEY, debug=True)
     
-    # Menu
+    # Menu loop
     while True:
         print("\n" + "=" * 70)
         print("OPTIONS:")
         print("1. Test connection and permissions")
         print("2. Export contacts from a specific list")
         print("3. Export ALL contacts") 
-        print("4. Quick export (specific list, no prompt)")
-        print("5. Exit")
+        print("4. Exit")
         print("=" * 70)
         
-        choice = input("\nEnter your choice (1-5): ").strip()
+        choice = input("\nEnter your choice (1-4): ").strip()
         
         if choice == '1':
             exporter.test_connection()
@@ -570,45 +581,47 @@ def main():
             
         elif choice == '2':
             list_id = input("\nEnter the List ID: ").strip()
+            if not list_id:
+                print("❌ No list ID provided")
+                continue
+                
             list_name = input("Enter a friendly name for this list (optional): ").strip()
             filename = input("Enter filename (default: hubspot_export.xlsx): ").strip() or "hubspot_export.xlsx"
             
-            exporter.export_to_excel(
+            success = exporter.export_to_excel(
                 filename=filename,
                 list_id=list_id,
                 list_name=list_name
             )
             
+            if success:
+                input("\nPress Enter to continue...")
+            
         elif choice == '3':
             filename = input("\nEnter filename (default: all_contacts_export.xlsx): ").strip() or "all_contacts_export.xlsx"
-            exporter.export_to_excel(filename=filename)
+            
+            success = exporter.export_to_excel(filename=filename)
+            
+            if success:
+                input("\nPress Enter to continue...")
             
         elif choice == '4':
-            # Quick export with defaults
-            LIST_ID = "2"  # Change this to your list ID
-            exporter.export_to_excel(
-                filename="quick_export.xlsx",
-                list_id=LIST_ID,
-                list_name="Quick Export"
-            )
-            
-        elif choice == '5':
             print("\nGoodbye!")
             break
         
         else:
             print("\n❌ Invalid choice. Please try again.")
-
-
-if __name__ == "__main__":
-    # Option 1: Run interactive menu
-    main()
     
-    # Option 2: Direct export (uncomment and modify as needed)
-    # API_KEY = "your-token-here"
-    # exporter = HubSpotCompleteExporter(API_KEY, debug=True)
-    # exporter.export_to_excel(
-    #     filename="my_complete_export.xlsx",
-    #     list_id="2",
-    #     list_name="My Important Contacts"
-    # )
+    return 0
+
+
+# This ensures the script runs properly when executed
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\n\nOperation cancelled by user.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {str(e)}")
+        sys.exit(1)
